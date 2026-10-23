@@ -1,3 +1,4 @@
+
 name: OSGi Maven build
 
 on:
@@ -6,14 +7,14 @@ on:
   workflow_dispatch:
     inputs:
       build_mode:
-        description: Build every product or only changed products and their dependents
+        description: Build all products or only changed products and their dependents
         type: choice
         options:
           - full
           - changed
         default: full
       base_ref:
-        description: Git ref to compare against when build mode is changed
+        description: Git ref to compare against in changed mode
         type: string
         default: main
 
@@ -24,6 +25,7 @@ jobs:
   build:
     name: Build OSGi products
     runs-on: ubuntu-latest
+
     steps:
       - name: Check out repository history
         uses: actions/checkout@v4
@@ -36,38 +38,50 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: maven
-          cache-dependency-path: osgi-workshop/pom.xml
+          cache-dependency-path: pom.xml
 
       - name: Select build scenario
         id: scenario
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BUILD_MODE: ${{ inputs.build_mode }}
+          BASE_REF: ${{ inputs.base_ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "mode=${{ inputs.build_mode }}" >> "$GITHUB_OUTPUT"
-            echo "base=${{ inputs.base_ref }}" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "mode=${BUILD_MODE:-full}" >> "$GITHUB_OUTPUT"
+            echo "base=${BASE_REF:-main}" >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT_NAME" == "pull_request" ]]; then
             echo "mode=changed" >> "$GITHUB_OUTPUT"
-            echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+            echo "base=$PR_BASE_SHA" >> "$GITHUB_OUTPUT"
           else
             echo "mode=changed" >> "$GITHUB_OUTPUT"
-            echo "base=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+            echo "base=$PUSH_BEFORE_SHA" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Resolve Maven and OSGi dependency graphs
         id: plan
+        env:
+          BUILD_MODE: ${{ steps.scenario.outputs.mode }}
+          BASE_REF: ${{ steps.scenario.outputs.base }}
         run: |
-          python3 osgi-workshop/scripts/build_pipeline.py \
-            --mode "${{ steps.scenario.outputs.mode }}" \
-            --base "${{ steps.scenario.outputs.base }}"
+          python3 scripts/build_pipeline.py \
+            --mode "$BUILD_MODE" \
+            --base "$BASE_REF"
 
       - name: Test dependency planner
-        run: python3 -m unittest discover -s osgi-workshop/scripts -p 'test_*.py'
+        run: |
+          python3 -m unittest discover \
+            -s scripts \
+            -p 'test_*.py'
 
       - name: Build selected reactor projects
         if: steps.plan.outputs.build_required == 'true' && steps.scenario.outputs.mode == 'changed'
         run: |
           mvn --batch-mode --no-transfer-progress \
-            --file osgi-workshop/pom.xml \
+            --file pom.xml \
             --projects "${{ steps.plan.outputs.maven_projects }}" \
             --also-make \
             verify
@@ -76,7 +90,7 @@ jobs:
         if: steps.plan.outputs.build_required == 'true' && steps.scenario.outputs.mode == 'full'
         run: |
           mvn --batch-mode --no-transfer-progress \
-            --file osgi-workshop/pom.xml \
+            --file pom.xml \
             verify
 
       - name: Upload bundle and feature JARs
@@ -84,7 +98,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: northwind-oms-jars
-          path: osgi-workshop/*/target/.jar
+          path: '**/target/*.jar'
           if-no-files-found: error
           retention-days: 30
 
@@ -94,8 +108,8 @@ jobs:
         with:
           name: northwind-oms-dependency-graphs
           path: |
-            osgi-workshop/build-reports/dependency-graph.json
-            osgi-workshop/build-reports/dependency-graph-full.mmd
-            osgi-workshop/build-reports/dependency-graph-changed.mmd
-          if-no-files-found: error
+            build-reports/dependency-graph.json
+            build-reports/dependency-graph-full.mmd
+            build-reports/dependency-graph-changed.mmd
+          if-no-files-found: warn
           retention-days: 30
